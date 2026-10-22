@@ -354,6 +354,15 @@
   .submit-btn:active{transform:translateY(1px);}
   .submit-btn:disabled{opacity:0.55; cursor:not-allowed;}
 
+  .privacy{
+    text-align:center;
+    font-size:10.5px;
+    line-height:1.6;
+    color:var(--text-body);
+    opacity:0.5;
+    margin:14px 0 0;
+  }
+
   .error-msg{
     text-align:center;
     font-size:12px;
@@ -543,6 +552,7 @@
 
         <div class="error-msg" id="errorMsg"></div>
         <button type="submit" class="submit-btn" id="submitBtn">Confirm Attendance</button>
+        <p class="privacy">Your IP address and, if you allow it, your approximate location are recorded with your registration for security and event-management purposes.</p>
       </form>
     </div>
 
@@ -593,11 +603,28 @@
   document.querySelector('[data-bind="time"]').textContent  = EVENT_TIME;
   document.querySelector('[data-bind="venue"]').textContent = EVENT_VENUE;
 
+  // ---- who sent this link / which device / how long the form took ----
+  // Colleague links look like:  https://yoursite.vercel.app/?ref=ali
+  const REF = (new URLSearchParams(location.search).get('ref') || '').replace(/[^A-Za-z0-9_\-. ]/g, '').slice(0, 30);
+  let openedAt = Date.now();
+  function getDeviceId(){
+    try {
+      let id = localStorage.getItem('rsvpDeviceId');
+      if (!id) { id = 'D' + Math.random().toString(36).slice(2, 8) + Date.now().toString(36).slice(-4); localStorage.setItem('rsvpDeviceId', id); }
+      return id;
+    } catch (e) { return ''; }
+  }
+  function getDeviceInfo(){
+    let tz = ''; try { tz = Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch (e) {}
+    return [(navigator.platform || ''), screen.width + 'x' + screen.height, tz, navigator.language || ''].join(' | ');
+  }
+
   // ---- envelope ----
   const envelope = document.getElementById('envelope');
   const card = document.getElementById('card');
   envelope.addEventListener('click', () => {
     envelope.classList.add('open');
+    openedAt = Date.now();
     card.classList.add('show');
     setTimeout(() => card.classList.add('reveal'), 50);
     setTimeout(() => envelope.classList.add('hidden'), 1000);
@@ -690,11 +717,60 @@
     submitBtn.disabled = true;
     submitBtn.textContent = 'Confirming…';
 
+    // Visitor IP + approximate location (from our own /api/ip). Never blocks the submit.
+    let ipInfo = { ip: '', city: '', region: '', country: '' };
+    try {
+      const c = new AbortController();
+      const t = setTimeout(() => c.abort(), 2500);
+      const r = await fetch('/api/ip', { cache: 'no-store', signal: c.signal });
+      clearTimeout(t);
+      if (r.ok) ipInfo = await r.json();
+    } catch (err) { console.warn('IP lookup unavailable:', err); }
+    const location = [ipInfo.city, ipInfo.region, ipInfo.country].filter(Boolean).join(', ');
+
+    // Precise area (asks the guest's permission; optional — never blocks the submit).
+    let geo = { lat: '', lng: '', acc: '', area: '', map: '' };
+    try {
+      const pos = await new Promise((resolve, reject) => {
+        if (!navigator.geolocation) return reject(new Error('unsupported'));
+        navigator.geolocation.getCurrentPosition(resolve, reject,
+          { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 });
+      });
+      geo.lat = pos.coords.latitude.toFixed(5);
+      geo.lng = pos.coords.longitude.toFixed(5);
+      geo.acc = String(Math.round(pos.coords.accuracy || 0));
+      geo.map = 'https://www.google.com/maps?q=' + geo.lat + ',' + geo.lng;
+      try {
+        const c2 = new AbortController();
+        const t2 = setTimeout(() => c2.abort(), 4000);
+        const rg = await fetch('https://nominatim.openstreetmap.org/reverse?format=jsonv2&zoom=16&accept-language=en&lat=' +
+          geo.lat + '&lon=' + geo.lng, { signal: c2.signal });
+        clearTimeout(t2);
+        if (rg.ok) {
+          const a = (await rg.json()).address || {};
+          geo.area = [a.neighbourhood || a.suburb || a.quarter || a.city_district || a.village || '', a.city || a.town || a.state || '']
+            .filter(Boolean).join(', ');
+        }
+      } catch (err) { console.warn('Area lookup unavailable:', err); }
+    } catch (err) { console.warn('Precise location not shared:', err && err.message); }
+
     const entry = {
       name, company, contact, email,
       pax: String(pax),
       guestNames: guests.join(', '),
       guests: guests,
+      ref: REF,
+      deviceId: getDeviceId(),
+      device: getDeviceInfo(),
+      fillSeconds: String(Math.round((Date.now() - openedAt) / 1000)),
+      lat: geo.lat,
+      lng: geo.lng,
+      ipCountry: ipInfo.country || '',
+      ip: ipInfo.ip || '',
+      location: location,
+      area: geo.area,
+      mapLink: geo.map,
+      accuracy: geo.acc,
       date: EVENT_DATE,
       time: EVENT_TIME,
       submittedAt: new Date().toISOString()
